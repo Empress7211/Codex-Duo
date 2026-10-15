@@ -1,0 +1,9 @@
+#!/bin/sh
+ORBIT_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+export PYTHONDONTWRITEBYTECODE=1
+if [ -n "${ORBIT_PYTHON:-}" ]; then
+  ORBIT_BRIDGE_PYTHON="$ORBIT_PYTHON"
+else
+  ORBIT_BRIDGE_PYTHON="$ORBIT_SCRIPT_DIR/../python/bin/python3"
+fi
+exec "$ORBIT_BRIDGE_PYTHON" -E -s -B "$ORBIT_SCRIPT_DIR/orbit_bridge.py" "$@"

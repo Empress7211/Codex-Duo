@@ -1,0 +1,33 @@
+# macOS and editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Rebuildable applications and local release archives
+*.app/
+outputs/
+source/duo-instance-launcher
+
+# Locally generated third-party icon derivatives (see assets/README.md)
+assets/ChatGPT.png
+assets/Orbit.png
+assets/Orbit.icns
+assets/Orbit.iconset/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Private runtime, authentication, and machine-specific configuration
+runtime/
+Signing/
+.env
+.env.*
+!.env.example
+runtime-location.json
+*.keychain-db
+*.p12
+*.pem
