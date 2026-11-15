@@ -1,8 +1,8 @@
 """Sign generated local wrappers without a certificate or private key.
 
 Only the build-time packager may supply a publisher identity. Installed users
-reuse the packaged engine signature and ad-hoc sign their local wrappers;
-signing never creates a keychain or changes the user trust/search list.
+ad-hoc sign their generated copies of the local native app; signing never
+creates a keychain or changes the user trust/search list.
 """
 from __future__ import annotations
 from pathlib import Path

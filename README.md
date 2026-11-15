@@ -8,7 +8,7 @@
 
 [快速开始](#快速开始) · [使用图解](#使用图解) · [从源码构建](#从源码构建) · [完整使用说明](docs/usage.md)
 
-![Version](https://img.shields.io/badge/version-0.6.0-blue)
+![Version](https://img.shields.io/badge/version-0.7.2-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS_14%2B-lightgrey)
 ![Architecture](https://img.shields.io/badge/arch-Apple_Silicon-lightgrey)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -17,7 +17,7 @@
 
 ![Codex Duo 多窗口与共享工作区结构示意](docs/images/overview.svg)
 
-> 社区独立项目，与 OpenAI 无关联或官方背书。当前是 **0.6.0 / build 18 实验版本，仅发布源码**。兼容目标固定为官方 Codex build **20398 / 26.1007.71326**，不保证最新客户端兼容。默认构建为 ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。
+> 社区独立项目，与 OpenAI 无关联或官方背书。当前是 **0.7.2 / build 21 实验版本，提供源码与 Apple Silicon 应用包**。应用包不内置 Codex 引擎；运行时从本机原生 Codex 生成受管副本，按实际接口结构自动识别兼容性。默认构建为 ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。
 
 ## 为什么使用 Duo
 
@@ -36,22 +36,22 @@
 
 ## 快速开始
 
-目前没有公开提供含官方引擎的预编译安装包。请先按下方步骤自行构建；本仓库的 ZIP 下载是源码，不是可直接拖入“应用程序”的安装包。
+从 [GitHub Release v0.7.2](https://github.com/Empress7211/Codex-Duo/releases/tag/v0.7.2) 下载 `Codex-Duo-0.7.2-macos-arm64.zip`，解压后将 `Codex Duo.app` 拖入“应用程序”。Release 中的 “Source code” 下载项用于自行构建。应用包内含 Python 运行时。
 
 **准备条件**
 
 - Apple Silicon Mac，macOS 14 或更新版本。
-- 自己安装的兼容版官方 Codex，build `20398`、版本 `26.1007.71326`。其他版本需要重新适配。
+- 自己安装的官方 Codex。优先检测 `/Applications/Codex.app`，其次检测 `/Applications/ChatGPT.app`；版本号变化不会单独阻止启动。
 - API 模式：在自己的 CC Switch 中配置 Codex API 供应商。订阅模式：在新实例内登录自己的账号。
-- 本地构建还需要 Xcode Command Line Tools、可重定位的 portable Python 3.11+ 和本地图标素材，详见[构建步骤](#从源码构建)。
+- 自行构建还需要 Xcode Command Line Tools、可重定位的 portable Python 3.11+ 和本地图标素材，详见[构建步骤](#从源码构建)。
 
-构建完成后，将完整的 `Codex Duo.app` 复制到 `/Applications`，再打开：
+将完整的 `Codex Duo.app` 复制到 `/Applications`，再打开：
 
 ```sh
 open -n '/Applications/Codex Duo.app'
 ```
 
-仓库中的 `打开工具.command` 也会打开上述安装位置。
+仓库中的 `打开工具.command` 也会打开上述安装位置。当前应用使用 ad-hoc 签名。如果 macOS 阻止打开，请在“系统设置 → 隐私与安全性”中选择“仍要打开”，按系统提示确认。
 
 ## 使用图解
 
@@ -86,7 +86,7 @@ open -n '/Applications/Codex Duo.app'
 
 ## 从源码构建
 
-构建仅在本地生成应用，不修改已安装的官方客户端。固定引擎会被打入你的本地应用包，仓库没有附带它。
+构建只打包 Duo 管理器和 Python，不包含 Codex 引擎。运行时只读检测本机原生 Codex，按需创建并修改工具拥有的副本。
 
 ```sh
 git clone https://github.com/Empress7211/Codex-Duo.git
@@ -96,15 +96,10 @@ xcode-select --install  # 已有 Swift 工具链时跳过
 
 1. 按 [assets/README.md](assets/README.md) 从自己的兼容客户端准备本地图标。图标源文件及衍生素材均不上传仓库。
 2. 准备 **可重定位的 portable Python 3.11+**，其中包含 `bin/python3`、标准库及 `lib/python*/LICENSE.txt`。普通 Homebrew Python 不能直接视为可移植运行时；打包器会检查重定位与外部动态库依赖。
-3. 指定自己的运行时和官方客户端路径执行构建：
+3. 指定自己的 Python 运行时执行构建：
 
 ```sh
-./build.sh \
-  --python-runtime /absolute/path/to/portable/python \
-  --source-app /Applications/ChatGPT.app
-
-# 如果客户端安装名为 Codex.app，请改成 /Applications/Codex.app。
-# 未传 --source-app 时，优先 Codex.app，再尝试 ChatGPT.app。
+./build.sh --python-runtime /absolute/path/to/portable/python
 ```
 
 输出为仓库根目录的 `Codex Duo.app`。源码后端只使用 Python 标准库；用户运行构建后的完整应用时无需另装 Python。若共享历史含 `.jsonl.zst` 文件，还需 Python `compression.zstd` 或本机 `zstd` 命令，缺少解码能力会停止迁移。
@@ -115,7 +110,7 @@ xcode-select --install  # 已有 Swift 工具链时跳过
 
 # 发布者可选：选择本机构建签名身份
 ./build.sh --python-runtime /absolute/path/to/portable/python \
-  --source-app /Applications/ChatGPT.app --sign-identity 'SIGNING_IDENTITY'
+  --sign-identity 'SIGNING_IDENTITY'
 ```
 
 `--sign-identity` 不会自动完成 Hardened Runtime 或公证。`--runtime-root` 用于隔离开发数据，普通构建使用默认值，不应把本机测试路径放入分发包。源码开源不代表有权再分发官方引擎与第三方图标，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
@@ -127,15 +122,17 @@ xcode-select --install  # 已有 Swift 工具链时跳过
 - **关闭实例**：保留应用、登录和缓存，后续可从管理器、Finder 或 Dock 重开。
 - **删除实例**：在管理器停止后删除，清理该实例及其路径引用，保留共享项目与会话。不要先手动删 runtime。
 - **备份**：停止相关写入者，同时备份官方共享历史；runtime 中的历史软链接不构成完整备份。
-- **升级**：结束相关工具任务并关闭窗口，再替换管理器。固定引擎不自动跟随官方客户端更新，旧 Orbit 数据与加密缓存不自动迁移。
+- **升级**：结束相关工具任务并关闭窗口，再替换管理器。官方客户端更新后，已停止的实例在下次启动时自动从新版原生生成副本；运行中的实例继续使用原副本直到退出。登录、配置和历史保留。旧 Orbit 数据与加密缓存不自动迁移。
 
 完整的同步机制、恢复与存储说明见 [使用详解](docs/usage.md)。
 
 ## 已知限制与验证状态
 
-部分重签实例的官方内置 MCP / Computer Use 辅助能力出现认证错误，目前未验证可用。真实模型请求、订阅登录、全新机器安装、完整网络流量审计及正式签名公证，均不在当前已通过的开发验证范围内。
+跨对话读取由 Duo 的 `duo_history` 只读 MCP 提供 `list_threads` 和 `read_thread`。可按标题查找，再用会话 ID 或 `codex://threads/...` 链接读取已落盘消息，支持分页及按需读取工具记录。范围为当前共享的本地 Codex 历史。新建实例、同步配置和启动时自动接入，并修正内置插件市场的实例路径。
 
-已有验证覆盖隔离环境下的实例启动、显示、关闭重开、改名、删除与引擎更新。具体证据与边界见 [0.6.0 验证记录](docs/validation.md) 和 [发布说明](RELEASE.md)。
+官方内置工具使用原生副本中保留官方签名的 Node 和 CLI。Python 观察器通过官方 Node 托管 CLI，使工具进程及其父、祖父进程满足原生签名检查。已验证原生连接鉴权、CLI 握手及转发生命周期，侧边栏浏览器的完整窗口操作仍待实测。真实模型请求、订阅登录、全新机器安装、完整网络流量审计及正式签名公证，均不在当前已通过的开发验证范围内。
+
+0.7.1 对历史加载、分页基线和完成事件去重做了离线定向回归；未启动客户端做界面验收。升级后重新打开受管窗口生效；之前已持久化的未读提示可在会话菜单中标记已读，更新不会批量清空真实未读。旧版已有的生命周期验证不能证明新版界面行为。证据见 [验证记录](docs/validation.md)，当前行为见 [发布说明](RELEASE.md)。
 
 ## 项目结构与参与贡献
 
@@ -150,7 +147,7 @@ THIRD_PARTY_NOTICES.md  第三方组件及许可范围
 
 欢迎提交 [Issue](https://github.com/Empress7211/Codex-Duo/issues) 或 PR。报告问题时请提供 macOS / 芯片型号、Duo 与官方客户端 build、复现步骤和已脱敏的错误信息。不要上传 `auth.json`、API key、CC Switch 数据库、完整 runtime 或私人会话。
 
-适配新官方 build 时，需要核验脚本结构、补丁位置和完整性摘要，不能只修改版本常量。当前构建产物、本机开发笔记、认证和第三方图片由 `.gitignore` 排除。
+更新时按实际启动入口、同步与写入权接口自动定位补丁，文件哈希后缀、压缩变量或 build 变化无需手改。若关键接口被删除或定位有歧义，会提示具体不兼容点并保留原副本；不能保证任意未来架构都自动兼容。当前构建产物、本机开发笔记、认证和第三方图片由 `.gitignore` 排除。
 
 ## 许可证
 

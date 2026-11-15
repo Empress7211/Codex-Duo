@@ -16,6 +16,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 if __name__ == '__main__':
@@ -93,7 +94,9 @@ def read_writer_locks(lock_dir: Path, thread_ids, *, alive=pid_alive) -> dict:
     try:
         result = subprocess.run(
             ['/usr/sbin/lsof', '-F', 'pn', '--', *map(str, busy_paths)],
-            capture_output=True, text=True, timeout=5,
+            # Some macOS hosts take longer than five seconds to enumerate open
+            # files. Callers in the desktop bridge run this off the RPC loop.
+            capture_output=True, text=True, timeout=15,
         )
         if result.returncode not in (0, 1):
             raise OSError(f'lsof exited with code {result.returncode}')
@@ -108,6 +111,55 @@ def read_writer_locks(lock_dir: Path, thread_ids, *, alive=pid_alive) -> dict:
         for tid in busy_paths.values():
             records[tid]['error'] = str(error)
     return records
+
+
+class BackgroundLockReader:
+    """Probe lock state immediately and resolve owners away from the RPC loop.
+
+    Owner results are short-lived hints for display and handoff discovery. A
+    write request must independently use read_writer_locks before admission.
+    """
+    def __init__(self, refresh_interval=5):
+        self.refresh_interval = refresh_interval
+        self.mutex = threading.Lock()
+        self.cached = {}
+        self.last_finished = 0
+        self.running = False
+
+    def __call__(self, lock_dir: Path, thread_ids, *, alive=pid_alive) -> dict:
+        records = {}
+        busy = []
+        for tid in thread_ids:
+            try:
+                held = lock_busy(Path(lock_dir) / (tid + '.lock'))
+                records[tid] = {'busy': held, 'owner_pid': None}
+                if held:
+                    busy.append(tid)
+            except OSError as error:
+                records[tid] = {'busy': None, 'owner_pid': None, 'error': str(error)}
+        with self.mutex:
+            now = time.monotonic()
+            for tid in thread_ids:
+                if records[tid]['busy'] is not True:
+                    self.cached.pop(tid, None)
+                elif now - self.last_finished < self.refresh_interval:
+                    cached = self.cached.get(tid)
+                    if cached and cached.get('owner_pid') is not None and alive(cached['owner_pid']):
+                        records[tid]['owner_pid'] = cached['owner_pid']
+            if busy and not self.running and now - self.last_finished >= self.refresh_interval:
+                self.running = True
+                threading.Thread(target=self._resolve, args=(lock_dir, tuple(busy)), daemon=True).start()
+        return records
+
+    def _resolve(self, lock_dir, thread_ids):
+        records = {}
+        try:
+            records = read_writer_locks(lock_dir, thread_ids)
+        finally:
+            with self.mutex:
+                self.cached = records
+                self.last_finished = time.monotonic()
+                self.running = False
 
 
 class RuntimeSnapshot:
@@ -173,7 +225,7 @@ class RuntimeSnapshot:
         return observations, profiles, handoff_ready, errors
 
     def snapshot(self, thread_ids, *, local_pid: int | None = None,
-                 local_profile: str | None = None) -> dict:
+                 local_profile: str | None = None, lock_reader=None) -> dict:
         # Identifiers come from thread/list/read. Reject path-like identifiers
         # at the filesystem boundary; retain normal official and test IDs.
         tids = list(dict.fromkeys(thread_ids))
@@ -197,7 +249,7 @@ class RuntimeSnapshot:
         except (sqlite3.Error, OSError, ValueError) as error:
             turns = {}
             result['errors'].append({'source': 'history', 'error': str(error)})
-        locks = self.lock_reader(self.lock_dir, tids, alive=alive)
+        locks = (lock_reader or self.lock_reader)(self.lock_dir, tids, alive=alive)
         for tid in tids:
             lock = locks[tid]
             busy, owner_pid = lock['busy'], lock.get('owner_pid')

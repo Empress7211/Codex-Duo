@@ -138,6 +138,19 @@ def app_info():
             'bundle': data['CFBundleIdentifier'], 'executable': data['CFBundleExecutable']}
 
 
+def desktop_executables(app):
+    """Locate this copy's native engine, including a still-running old copy."""
+    receipt = app / 'Contents/Resources/duo-patches.json'
+    if receipt.exists():
+        names = {json.loads(receipt.read_text())['executable']}
+    elif (app / 'Contents/Info.plist').exists():
+        name = plistlib.loads((app / 'Contents/Info.plist').read_bytes())['CFBundleExecutable']
+        names = {'ChatGPT' if name == 'DuoInstance' else name}
+    else:
+        names = set()
+    return [str(app / 'Contents/MacOS' / name) for name in names]
+
+
 def fingerprints(source, cc):
     # Small, explicitly protected configs only; never read OAuth or hash history.
     result = {}
@@ -305,7 +318,7 @@ class Manager:
 
     def template_running(self):
         prefix = str(self.root / 'desktop') + '/'
-        return any(command.startswith(prefix) and ('/Contents/MacOS/ChatGPT ' in command or ' app-server' in command)
+        return any(command.startswith(prefix) and ('/Contents/MacOS/' in command or ' app-server' in command)
                    for _, _, command in process_table())
 
     def require_template_stopped(self):
@@ -322,8 +335,8 @@ class Manager:
 
     def pids(self, profile):
         expected = '--user-data-dir=' + str(self.ui(profile))
-        executables = [str(app / 'Contents/MacOS/ChatGPT')
-                       for app in self._desktop_candidates(profile)]
+        executables = [executable for app in self._desktop_candidates(profile)
+                       for executable in desktop_executables(app)]
         candidates = [pid for pid, _, command in process_table()
                       if any(command.startswith(executable + ' ') for executable in executables) and expected in command
                       and '--type=' not in command]
@@ -547,7 +560,7 @@ class Manager:
 
     def initialize_shared_workspace(self):
         """Create a new workspace on canonical history without importing it."""
-        from managed_desktop import BUILD
+        from managed_desktop import check_desktop_support
         from shared_store import canonical_paths, HISTORY_DIRS
 
         path = self.root / 'manifest.json'
@@ -571,8 +584,7 @@ class Manager:
             count_threads(paths['sqlite_home'])  # Read-only schema check; no history copy.
             self._common()  # Validate the inherited configuration before publishing ownership.
             current_app = app_info()
-            if current_app['build'] != BUILD:
-                raise UserError('当前 Codex 桌面版本尚未核验，未创建共享工作区。')
+            check_desktop_support(APP)
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.root, 0o700)
             manifest = {'owner': 'codex-dual', 'schema': SCHEMA, 'root': str(self.root),
@@ -587,7 +599,7 @@ class Manager:
             if directory.is_symlink():
                 raise UserError('工具目录被重定向，未完成初始化：' + name)
             directory.mkdir(mode=0o700, exist_ok=True)
-        # The shared desktop copy is prepared once on the first actual launch.
+        # Prepare the local native copy only on the first actual launch.
         # Creating an empty workspace copies no desktop, SQLite, or rollouts.
         manifest['sync'].update(enabled=True, phase='ready', enabled_at=time.time(),
                                 history_source='canonical')
@@ -662,9 +674,12 @@ class Manager:
         seed_sidebar(donor, self.home(profile_id))
         item['ready'] = True
         write_json(self.root / 'manifest.json', manifest)
+        message = name + ' 已创建。订阅登录需在自己的新窗口中完成。'
         if provider_id:
-            self.configure_api(provider_id, profile_id)
-        return {'profile': self.profile(profile_id), 'message': name + ' 已创建。订阅登录需在自己的新窗口中完成。'}
+            result = self.configure_api(provider_id, profile_id)
+            if result.get('warning'):
+                message += result['warning']
+        return {'profile': self.profile(profile_id), 'message': message}
 
     def rename_profile(self, profile, name):
         manifest = self.owned()
@@ -754,6 +769,8 @@ class Manager:
 
     def _profile_config(self, profile, common, source_model, api_record=None):
         target = copy.deepcopy(common)
+        self._localize_bundled_marketplace(profile, target)
+        target.setdefault('mcp_servers', {})['duo_history'] = self._history_tools_config()
         kind = self.profile(profile)['kind']
         target['forced_login_method'] = 'chatgpt' if kind == 'subscription' else 'api'
         if kind == 'subscription':
@@ -769,17 +786,75 @@ class Manager:
                 'wire_api': 'responses', 'requires_openai_auth': True}
             if saved and saved.get('reasoning_effort'):
                 target['model_reasoning_effort'] = saved['reasoning_effort']
+            if saved and saved.get('service_tier'):
+                target['service_tier'] = saved['service_tier']
         # Historic provider aliases resolve through this instance's own auth.
         target['model_providers'] = {'custom': provider, 'openai_http': copy.deepcopy(provider)}
         return target
+
+    def _localize_bundled_marketplace(self, profile, config):
+        # Desktop registers its bundled marketplace under this instance's home.
+        # Importing the native path prevents reconciliation and app-tool install.
+        marketplace = config.get('marketplaces', {}).get('openai-bundled')
+        if marketplace and marketplace.get('source_type') == 'local':
+            marketplace['source'] = str(self.home(profile) / '.tmp/bundled-marketplaces/openai-bundled')
+
+    def repair_bundled_marketplace(self, profile):
+        path = self.home(profile) / 'config.toml'
+        config = read_toml(path)
+        previous = copy.deepcopy(config.get('marketplaces'))
+        self._localize_bundled_marketplace(profile, config)
+        if config.get('marketplaces') != previous:
+            atomic_write(path, toml_dump(config))
+            return True
+        return False
+
+    def _history_tools_config(self):
+        return {'command': sys.executable,
+                'args': ['-B', str(Path(__file__).resolve().with_name('thread_reader.py')),
+                         '--sqlite-home', str(self.history_sqlite())],
+                'enabled': True}
+
+    def repair_history_tools(self, profile):
+        path = self.home(profile) / 'config.toml'
+        config = read_toml(path)
+        expected = self._history_tools_config()
+        if config.get('mcp_servers', {}).get('duo_history') != expected:
+            config.setdefault('mcp_servers', {})['duo_history'] = expected
+            atomic_write(path, toml_dump(config))
+
+    def _preserve_speed(self, profile, target):
+        # The native selector writes either the root setting or a named
+        # profile setting. Keep both when regenerating this instance's config.
+        path = self.home(profile) / 'config.toml'
+        if not path.exists():
+            return target
+        previous = read_toml(path)
+        if 'service_tier' in previous:
+            target['service_tier'] = previous['service_tier']
+        for name, settings in previous.get('profiles', {}).items():
+            if 'service_tier' in settings:
+                target.setdefault('profiles', {}).setdefault(name, {})['service_tier'] = settings['service_tier']
+        return target
+
+    def _speed_warning(self, config):
+        if (config.get('service_tier') in ('fast', 'priority')
+                and config.get('features', {}).get('fast_mode') is False):
+            return '当前普通配置关闭了 fast_mode，所选速度档位不会随请求发送。'
+        return ''
 
     def sync_settings(self):
         self.owned()
         self.require_upgrade_ready()
         self.require_stopped()
         common, model = self._common()
-        for p in [item['id'] for item in self.profiles()]:
-            atomic_write(self.home(p) / 'config.toml', toml_dump(self._profile_config(p, common, model)))
+        warnings = []
+        for item in self.profiles():
+            p = item['id']
+            config = self._preserve_speed(p, self._profile_config(p, common, model))
+            atomic_write(self.home(p) / 'config.toml', toml_dump(config))
+            if self._speed_warning(config):
+                warnings.append(item['name'])
         # Share our own skill copy, never a writable link into the user's skills.
         self._ensure_shared_skills()
         skill_target = self.root / 'shared/skills'
@@ -790,7 +865,10 @@ class Manager:
             agents = self.source / 'AGENTS.md'
             if agents.exists():
                 atomic_write(self.home(p) / 'AGENTS.md', agents.read_bytes())
-        return {'message': '已同步普通配置与 AGENTS.md；Skills 使用工具内共享副本。认证、供应商、自动化和原目录均未改动。'}
+        message = '已同步普通配置与 AGENTS.md；Skills 使用工具内共享副本。认证、供应商、自动化和原目录均未改动。'
+        if warnings:
+            message += '以下实例的速度档位受 fast_mode 关闭影响，不会随请求发送：' + '、'.join(warnings) + '。'
+        return {'message': message}
 
     def configure_api(self, provider_id, profile='api'):
         self.owned()
@@ -812,9 +890,11 @@ class Manager:
         if not config.get('model'):
             raise UserError('所选供应商未配置模型。')
         record = {'id': provider_id, 'name': metadata['name'], 'model': config['model'],
-                  'provider': provider, 'reasoning_effort': config.get('model_reasoning_effort')}
+                  'provider': provider, 'reasoning_effort': config.get('model_reasoning_effort'),
+                  'service_tier': config.get('service_tier')}
         common, model = self._common()
-        new_config = toml_dump(self._profile_config(profile, common, model, api_record=record))
+        target = self._preserve_speed(profile, self._profile_config(profile, common, model, api_record=record))
+        new_config = toml_dump(target)
         manifest = self.owned()
         manifest['profiles'] = self.profiles(manifest)
         item = self.profile(profile, manifest)
@@ -829,7 +909,9 @@ class Manager:
         if profile == 'api':
             manifest.update(api_ready=True, api_provider_id=provider_id, api_provider_name=metadata['name'], configured_at=time.time())
         write_json(self.root / 'manifest.json', manifest)
-        return {'message': '已将所选 API key 保存到独立实例。没有复制订阅令牌，没有更改 CC Switch。'}
+        warning = self._speed_warning(target)
+        return {'message': '已将所选 API key 保存到独立实例。没有复制订阅令牌，没有更改 CC Switch。' + warning,
+                'warning': warning}
 
     def _check_shell_redirects(self):
         # Desktop reloads the login shell environment itself. Inspect only the
@@ -855,22 +937,16 @@ class Manager:
         if manifest.get('sync', {}).get('phase') == 'preparing':
             raise UserError('同步切换尚未完成，请先重新执行启用同步。')
         current = app_info()
-        if current['build'] != manifest['app']['build']:
-            from managed_desktop import BUILD
-            if current['build'] != BUILD or not manifest.get('sync', {}).get('enabled'):
-                raise UserError('Codex 应用已更新，需先核验新版本的隔离启动参数。原应用可照常使用。')
-            # A newly verified Duo release may update a stopped workspace's
-            # recorded native build. Credentials/config/history stay in place.
-            self.require_stopped()
-            self.require_template_stopped()
-            manifest['app'] = current
-            write_json(self.root / 'manifest.json', manifest)
+        # Source identity and integration capabilities decide whether copies
+        # need updating. Native build changes alone are never a launch veto.
         item = self.profile(profile, manifest)
         if not item.get('ready', True):
             raise UserError('此实例创建未完成，尚不能启动。')
         if item['kind'] == 'api' and (not item.get('api_ready') or not (self.home(profile) / 'auth.json').exists()):
             raise UserError('请先选择并保存 API 配置。')
         self._check_shell_redirects()
+        self.repair_bundled_marketplace(profile)
+        self.repair_history_tools(profile)
         bridge = Path(__file__).resolve().with_name('orbit-cli')
         if not bridge.is_file():
             raise UserError('缺少 Duo 状态观察器，请使用完整应用包。')
@@ -878,12 +954,17 @@ class Manager:
         extra = []
         if manifest.get('sync', {}).get('enabled'):
             from managed_desktop import DesktopCopyNeedsUpdate, ensure_profile_desktop, ensure_ipc_dir
-            try:
-                prepared = ensure_profile_desktop(self.root, item, APP)
-            except DesktopCopyNeedsUpdate:
-                self.require_stopped(profile)
-                self.require_template_stopped()
-                prepared = ensure_profile_desktop(self.root, item, APP, allow_replace_stopped=True)
+            if self.pids(profile):
+                # A running instance keeps its snapshot until it exits. Do not
+                # replace its app or require unrelated instances to stop.
+                prepared = profile_app_path(self.root, item)
+            else:
+                try:
+                    prepared = ensure_profile_desktop(self.root, item, APP)
+                except DesktopCopyNeedsUpdate:
+                    self.require_stopped(profile)
+                    self.require_template_stopped()
+                    prepared = ensure_profile_desktop(self.root, item, APP, allow_replace_stopped=True)
             desktop = self.desktop_app(manifest, profile)
             if Path(prepared) != desktop:
                 raise UserError('受管应用副本路径不符合工作区声明。')
@@ -895,11 +976,20 @@ class Manager:
                       'ORBIT_PROFILE_ID': profile, 'ORBIT_PROFILE_NAME': item['name'],
                       'ORBIT_PYTHON': sys.executable,
                       'ORBIT_SYNC_HELPER': str(bridge.with_name('sidebar_sync.py')),
-                      'ORBIT_RUNTIME_HELPER': str(bridge.with_name('runtime_sync.py')),
-                      'ORBIT_REAL_CLI': str(desktop / 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')}
+                      'ORBIT_RUNTIME_HELPER': str(bridge.with_name('runtime_sync.py'))}
             for key, value in values.items():
                 extra.extend(['--env', key + '=' + value])
         already_running = bool(self.pids(profile))
+        # These runtimes retain the official signatures in the native snapshot.
+        # The observer uses Node as the CLI parent so Python stays outside the
+        # peer/parent/grandparent identities checked by native tool servers.
+        native_node = desktop / 'Contents/Resources/cua_node/bin/node'
+        if not native_node.is_file():
+            raise UserError('原生 Codex 缺少官方 Node 运行时，请更新官方客户端后重新启动此实例。')
+        for key in ('ORBIT_NATIVE_NODE', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH'):
+            extra.extend(['--env', key + '=' + str(native_node)])
+        extra.extend(['--env', 'ORBIT_REAL_CLI=' + str(
+            desktop / 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')])
         command = ['/usr/bin/open', '-n', '--env', 'CODEX_HOME=' + str(self.home(profile)),
                    '--env', 'CODEX_ELECTRON_USER_DATA_PATH=' + str(self.ui(profile)),
                    '--env', 'CODEX_SQLITE_HOME=' + str(self.history_sqlite(manifest)),
@@ -916,8 +1006,19 @@ class Manager:
             raise UserError('系统未能启动独立实例（退出码 ' + str(result.returncode) + '）。')
         for _ in range(30):
             if self.pids(profile):
+                if manifest.get('app') != current:
+                    manifest['app'] = current
+                    write_json(self.root / 'manifest.json', manifest)
                 message = (item['name'] + ' 已显示。' if already_running else
                            item['name'] + ' 已启动。订阅实例首次需要在新窗口登录。')
+                if item['kind'] == 'api' and manifest.get('sync', {}).get('enabled'):
+                    receipt = desktop / 'Contents/Resources/duo-patches.json'
+                    try:
+                        available = json.loads(receipt.read_text()).get('api_speed_available') is True
+                    except (OSError, ValueError):
+                        available = False
+                    if not available:
+                        message += '此实例未启用窗口速度选择；关闭后重新启动可更新副本。若仍不可用，说明当前客户端的速度接口尚未适配。'
                 return {'message': message, 'pids': self.pids(profile)}
             time.sleep(0.3)
         raise UserError('已发出启动请求，但未确认独立主进程。没有操作原有窗口。')
@@ -1008,12 +1109,16 @@ class Manager:
             result.update(history_checks=error.report, storage_error=str(error),
                           message='历史检查未通过：' + str(error))
             return result
-        from managed_desktop import BUILD
-        supported = app_info()['build'] == BUILD
+        from managed_desktop import check_desktop_support
+        try:
+            engine = check_desktop_support(APP)
+        except DesktopCopyError as error:
+            result.update(storage_compatible=report['can_switch'], history_checks=report,
+                          message='原生 Codex 兼容性检查未通过：' + str(error))
+            return result
         result.update(storage_compatible=report['can_switch'], history_checks=report,
-                      can_enable_sync=bool(report['can_switch'] and supported),
-                      message=('历史检查通过，可以启用受管窗口同步；本次检查未切换任何数据。'
-                               if supported else '历史检查通过，但当前应用 build 尚未验证，不能启用。'))
+                      can_enable_sync=bool(report['can_switch']), engine=engine,
+                      message='原生 Codex 与历史检查通过，可以启用受管窗口同步；本次检查未切换任何数据。')
         return result
 
     def enable_sync(self):
@@ -1185,7 +1290,7 @@ def main():
                     raise UserError('另一项工具操作正在进行，请等待它完成。') from None
                 data = manager.dispatch(request)
         print(json.dumps({'ok': True, 'data': data}, ensure_ascii=False))
-    except (UserError, ProviderError) as exc:
+    except (UserError, ProviderError, DesktopCopyError) as exc:
         print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
     except Exception as exc:
         # Raw parser/SQL/subprocess errors can include credentials. Keep details

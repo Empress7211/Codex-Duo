@@ -5,15 +5,12 @@ APP_DIR="$PWD/Codex Duo.app"
 ORBIT_BUILD_RUNTIME=""
 DUO_PYTHON_RUNTIME=""
 DUO_SIGN_IDENTITY="-"
-DUO_SOURCE_APP="/Applications/Codex.app"
-if [ ! -d "$DUO_SOURCE_APP" ]; then DUO_SOURCE_APP="/Applications/ChatGPT.app"; fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --runtime-root) ORBIT_BUILD_RUNTIME="${2:?Missing runtime-root}" ;;
     --python-runtime) DUO_PYTHON_RUNTIME="${2:?Missing python-runtime}" ;;
     --sign-identity) DUO_SIGN_IDENTITY="${2:?Missing sign-identity}" ;;
-    --source-app) DUO_SOURCE_APP="${2:?Missing source-app}" ;;
-    --help|-h) echo 'Usage: ./build.sh --python-runtime /portable/python [--source-app /Applications/Codex.app] [--runtime-root /absolute/path] [--sign-identity ID]'; exit 0 ;;
+    --help|-h) echo 'Usage: ./build.sh --python-runtime /portable/python [--runtime-root /absolute/path] [--sign-identity ID]'; exit 0 ;;
     *) echo 'Unknown option. Run ./build.sh --help' >&2; exit 2 ;;
   esac
   shift 2
@@ -34,10 +31,13 @@ mkdir -p "$BUILD_CACHE"
   -o "$APP_DIR/Contents/MacOS/CodexDuo" -framework AppKit
 /usr/bin/swiftc -O -module-cache-path "$BUILD_CACHE" source/InstanceLauncher.swift \
   -o source/duo-instance-launcher -framework AppKit
-cp source/backend.py source/ccswitch_reader.py source/history_store.py source/sidebar_store.py source/shared_store.py source/sidebar_sync.py source/runtime_sync.py source/managed_desktop.py source/local_signing.py source/managed_sync.js source/orbit_bridge.py source/orbit-cli "$APP_DIR/Contents/Resources/source/"
+cp source/backend.py source/ccswitch_reader.py source/history_store.py source/sidebar_store.py source/shared_store.py source/sidebar_sync.py source/runtime_sync.py source/managed_desktop.py source/desktop_main_patches.py source/desktop_renderer_patches.py source/desktop_speed_request_patches.py source/desktop_speed_ui_patches.py source/local_signing.py source/managed_sync.js source/orbit_bridge.py source/orbit-cli "$APP_DIR/Contents/Resources/source/"
 cp source/duo-instance-launcher "$APP_DIR/Contents/Resources/source/"
+cp source/thread_reader.py "$APP_DIR/Contents/Resources/source/"
+cp source/native_cli_host.cjs "$APP_DIR/Contents/Resources/source/"
 rm -f "$APP_DIR/Contents/Resources/source/duo-launch.cjs"
 cp assets/Orbit.icns assets/Orbit.png "$APP_DIR/Contents/Resources/"
+cp LICENSE THIRD_PARTY_NOTICES.md "$APP_DIR/Contents/Resources/"
 chmod +x "$APP_DIR/Contents/Resources/source/orbit-cli"
 rm -rf "$APP_DIR/Contents/Resources/source/__pycache__"
 "$DUO_BUILD_PYTHON" -B - "$APP_DIR" "$ORBIT_BUILD_RUNTIME" <<'PY'
@@ -60,8 +60,8 @@ with (app / 'Contents/Info.plist').open('wb') as out:
         'CFBundleIdentifier': 'local.codex-dual.launcher',
         'CFBundleExecutable': 'CodexDuo',
         'CFBundlePackageType': 'APPL',
-        'CFBundleShortVersionString': '0.6.0',
-        'CFBundleVersion': '18',
+        'CFBundleShortVersionString': '0.7.2',
+        'CFBundleVersion': '21',
         'CFBundleIconFile': 'Orbit.icns',
         'NSDocumentsFolderUsageDescription': '仅在你打开“文稿”中的项目时，Codex Duo 才需要访问该项目文件。实例登录数据保存在应用支持目录。',
         'LSMinimumSystemVersion': '14.0',
@@ -70,5 +70,5 @@ with (app / 'Contents/Info.plist').open('wb') as out:
     }, out)
 PY
 "$DUO_BUILD_PYTHON" -B source/package_app.py --app "$APP_DIR" \
-  --python-runtime "$DUO_PYTHON_RUNTIME" --source-app "$DUO_SOURCE_APP" --sign-identity "$DUO_SIGN_IDENTITY"
-echo 'Built Codex Duo.app (self-contained test package; publisher signing is build-only)'
+  --python-runtime "$DUO_PYTHON_RUNTIME" --sign-identity "$DUO_SIGN_IDENTITY"
+echo 'Built Codex Duo.app (manager only; native Codex is detected at runtime)'

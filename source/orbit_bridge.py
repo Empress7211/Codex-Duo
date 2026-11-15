@@ -30,6 +30,47 @@ RUNTIME_EVENTS = {'thread/status/changed', 'thread/started', 'turn/started',
                   'turn/plan/updated', 'turn/diff/updated'}
 
 
+class NativeCLIProcess:
+    """Keep the real writer PID while a signed Node owns the CLI process."""
+
+    def __init__(self, node: Path, real_cli: Path, args: list[str]):
+        host = Path(__file__).with_name('native_cli_host.cjs')
+        self.process = subprocess.Popen([str(node), str(host), str(real_cli), *args],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            self.pid = json.loads(self.process.stdout.readline())['cli_pid']
+        except (ValueError, KeyError):
+            self.process.stdin.close()
+            self.process.stdout.close()
+            self.process.wait()
+            raise RuntimeError('Native CLI host did not return its writer PID') from None
+        self.stdin = self.process.stdin
+        self.stdout = self.process.stdout
+
+    @property
+    def returncode(self):
+        return self.process.returncode
+
+    def poll(self):
+        return self.process.poll()
+
+    def wait(self, timeout=None):
+        return self.process.wait(timeout=timeout)
+
+    def send_signal(self, signum):
+        self.process.send_signal(signum)
+
+    def terminate(self):
+        self.send_signal(signal.SIGTERM)
+
+
+def start_cli(real_cli: Path, args: list[str]):
+    node = os.environ.get('ORBIT_NATIVE_NODE')
+    if node:
+        return NativeCLIProcess(Path(node), real_cli, args)
+    return subprocess.Popen([str(real_cli), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+
 def profile_directory(env: dict) -> Path:
     """Resolve only a home owned by this tool; never write into ordinary Codex."""
     raw = env.get('CODEX_HOME', '')
@@ -248,11 +289,39 @@ class RuntimeProjection:
                    or self.snapshots.get(tid, (None,))[0] == 'active']
         return self.reader.snapshot(ids, local_pid=self.pid, local_profile=self.profile.name)
 
+    def fresh_writer_snapshot(self, tid) -> dict:
+        from runtime_sync import read_writer_locks
+        return self.reader.snapshot([tid], local_pid=self.pid, local_profile=self.profile.name,
+                                    lock_reader=read_writer_locks)['threads'][tid]
+
+    def _hydrate(self, tid: str, record: dict, turns: list, latest: dict | None) -> None:
+        self.hydrated.add(tid)
+        self.hydrated_at[tid] = time.time()
+        # History already delivered in a response is a baseline, not a new
+        # completion. Native clients persist unread state on turn/completed.
+        if latest is not None:
+            self.turn_states[tid] = (latest['id'], latest['status'])
+        if (record['status'] == 'active' and record['owner_pid'] != self.pid
+                and record['owner_profile'] not in (None, 'native') and record.get('turn')):
+            turn_id = record['turn']['id']
+            baseline = {item['id'] for turn in turns if turn.get('id') == turn_id
+                        for item in turn.get('items', []) if item.get('id')}
+            self.hydration_replays[tid] = {'turn_id': turn_id, 'items': baseline}
+        if record['owner_profile'] == 'native':
+            self.native_threads.add(tid)
+
+    def observe_turn_event(self, message: dict) -> None:
+        if message.get('method') in ('turn/started', 'turn/completed'):
+            params = message['params']
+            turn = params['turn']
+            self.turn_states[params['threadId']] = (turn['id'], turn['status'])
+
     def rewrite_response(self, request: dict, message: dict) -> dict:
         from runtime_sync import rpc_status
         if 'result' not in message:
             return message
         method = request.get('method')
+        params = request.get('params') or {}
         value = message['result']
         if method in ('thread/list', 'thread/read', 'thread/resume', 'thread/start'):
             threads = value.get('data', []) if method == 'thread/list' else [value.get('thread')]
@@ -263,18 +332,24 @@ class RuntimeProjection:
                 record = records[thread['id']]
                 if record['status'] != 'unknown':
                     thread['status'] = rpc_status(record)
-                if method in ('thread/read', 'thread/resume'):
-                    self.hydrated.add(thread['id'])
-                    self.hydrated_at[thread['id']] = time.time()
-                    if (record['status'] == 'active' and record['owner_pid'] != self.pid
-                            and record['owner_profile'] not in (None, 'native') and record.get('turn')):
-                        turn_id = record['turn']['id']
-                        baseline = {item['id'] for turn in thread.get('turns', []) if turn.get('id') == turn_id
-                                    for item in turn.get('items', []) if item.get('id')}
-                        self.hydration_replays[thread['id']] = {'turn_id': turn_id, 'items': baseline}
-                    if record['owner_profile'] == 'native':
-                        self.native_threads.add(thread['id'])
+                full_read = method == 'thread/read' and params.get('includeTurns') is True
+                full_resume = method == 'thread/resume' and not params.get('excludeTurns', False)
+                page = value.get('initialTurnsPage') if method == 'thread/resume' else None
+                if full_read or full_resume or page is not None:
+                    turns = page['data'] if page is not None else thread.get('turns', [])
+                    descending = page is not None and (params.get('initialTurnsPage') or {}).get('sortDirection', 'desc') == 'desc'
+                    latest = (turns[0] if descending else turns[-1]) if turns else None
+                    self._hydrate(thread['id'], record, turns, latest)
             return message
+        if (method == 'thread/turns/list' and params.get('cursor') is None
+                and params.get('sortDirection') == 'desc'):
+            # Modern clients load the open chat through pages after a metadata
+            # read. Older pages must not replace the latest-turn baseline.
+            tid = params['threadId']
+            self.retain([tid])
+            record = self.snapshot([tid])['threads'][tid]
+            turns = value['data']
+            self._hydrate(tid, record, turns, turns[0] if turns else None)
         return message
 
     def _journal_events(self, snapshot: dict) -> list:
@@ -373,7 +448,10 @@ class RuntimeProjection:
                                                 'error': turn.get('error'), 'durationMs': turn['duration_ms'],
                                                 'startedAt': turn['started_at'], 'completedAt': turn['completed_at']}}}
                         if method == 'turn/completed':
-                            completion = event
+                            # A terminal first observation is only history.
+                            # A known active/older turn proves a new completion.
+                            if previous is not None:
+                                completion = event
                         else:
                             events.append(event)
                         self.turn_states[tid] = (turn['id'], turn['status'])
@@ -413,13 +491,20 @@ class RuntimeProjection:
                 self.native_threads.add(tid)
             if record['owner_pid'] == self.pid:
                 continue
+            if record['busy'] is True and record['owner_pid'] is None:
+                # Owner discovery is pending or unavailable; don't replace a
+                # real backend status with a speculative notLoaded event.
+                continue
             signature = (record['status'], tuple(record['active_flags']),
                          record['busy'], record['owner_pid'])
             if old != signature:
                 events.append({'method': 'thread/status/changed', 'params': {
                     'threadId': tid, 'status': rpc_status(record)}})
             self.snapshots[tid] = signature
-        events.extend(self._journal_events(snapshot))
+        journal_events = self._journal_events(snapshot)
+        for event in journal_events:
+            self.observe_turn_event(event)
+        events.extend(journal_events)
         events.extend(self._native_turn_events(snapshot))
         stable = json.dumps(snapshot['threads'], sort_keys=True, separators=(',', ':'))
         if stable != self.last_published:
@@ -457,13 +542,14 @@ class RuntimeProxy:
         self.release_leases = {}
         self.stdin_closed = False
         self.deferred_inputs = deque()
+        self.gate_pending = False
         self.next_poll = 0
         self._start_child()
 
     def _start_child(self, replay=False) -> None:
         self.generation += 1
         generation = self.generation
-        child = subprocess.Popen([str(self.real_cli), *self.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        child = start_cli(self.real_cli, self.args)
         self.child = child
         self.activity = Activity(self.profile, child.pid)
         self.journal = EventJournal(self.profile, child.pid)
@@ -517,7 +603,7 @@ class RuntimeProxy:
         self.waiting_resumes[message['id']] = {'request': message, 'record': record,
                                               'path': path, 'deadline': time.monotonic() + 8}
 
-    def _input(self, line: bytes) -> None:
+    def _input(self, line: bytes, checked_record=None) -> None:
         try:
             message = json.loads(line)
         except (ValueError, UnicodeDecodeError):
@@ -542,7 +628,18 @@ class RuntimeProxy:
             self.projection.retain([tid])
             if 'id' in message and (method == 'thread/resume' or method.startswith('turn/')
                                     or method in ('thread/compact/start', 'thread/shellCommand', 'thread/inject_items')):
-                record = self.projection.snapshot([tid])['threads'][tid]
+                if checked_record is None:
+                    self.gate_pending = True
+                    generation = self.generation
+                    def check_writer():
+                        try:
+                            result = self.projection.fresh_writer_snapshot(tid)
+                        except Exception as error:
+                            result = error
+                        self.messages.put(('writer_checked', generation, (line, result)))
+                    threading.Thread(target=check_writer, daemon=True).start()
+                    return
+                record = checked_record
                 lease = self.release_leases.get(tid)
                 if lease and lease['expires_at'] > time.time() and self.reader.alive(lease['requester_pid']):
                     self._writer_error(message, dict(record, owner_profile='handoff', status='idle'))
@@ -598,13 +695,14 @@ class RuntimeProxy:
             self.server_requests.add(message['id'])
         self.activity.observe(line)
         self.journal.observe(message)
+        self.projection.observe_turn_event(message)
         tid = (message.get('params') or {}).get('threadId')
         if isinstance(tid, str):
             self.projection.retain([tid])
         self.emit(line)
 
     def _all_idle(self) -> bool:
-        if (not self.initialized or self.saved_initialize is None or self.pending
+        if (not self.initialized or self.saved_initialize is None or self.pending or self.gate_pending
                 or self.server_requests or self.waiting_resumes or self.deferred_inputs):
             return False
         with self.messages.mutex:
@@ -710,23 +808,32 @@ class RuntimeProxy:
                     kind = None
                 if kind == 'input':
                     # During replacement initialization, defer normal requests.
-                    if any(p.get('internal') == 'initialize' for p in self.pending.values()):
+                    if self.gate_pending or any(p.get('internal') == 'initialize' for p in self.pending.values()):
                         self.deferred_inputs.append(value)
                     else:
                         self._input(value)
+                elif kind == 'writer_checked' and generation == self.generation:
+                    self.gate_pending = False
+                    line, record = value
+                    if isinstance(record, Exception):
+                        request = json.loads(line)
+                        self.emit({'id': request['id'], 'error': {'code': -32603,
+                                  'message': 'Could not verify the conversation writer: ' + str(record)}})
+                    else:
+                        self._input(line, record)
                 elif kind == 'output' and generation == self.generation:
                     self._output(value)
                 elif kind == 'stdin_closed':
                     self.stdin_closed = True
-                    if not self.deferred_inputs:
+                    if not self.deferred_inputs and not self.gate_pending:
                         self.child.stdin.close()
                 elif kind == 'exit' and generation == self.generation:
                     self.activity.finish(value)
                     return value if value >= 0 else 128 - value
                 if not any(p.get('internal') == 'initialize' for p in self.pending.values()):
-                    while self.deferred_inputs:
+                    while self.deferred_inputs and not self.gate_pending:
                         self._input(self.deferred_inputs.popleft())
-                    if self.stdin_closed and not self.child.stdin.closed:
+                    if self.stdin_closed and not self.deferred_inputs and not self.gate_pending and not self.child.stdin.closed:
                         self.child.stdin.close()
                 self._publish_handoff_availability()
                 if time.monotonic() >= self.next_poll and not self.stdin_closed:
@@ -758,11 +865,13 @@ def run_bridge(args: list[str], real_cli: Path = REAL_CLI) -> int:
         profile = None
     if profile is not None and os.environ.get('ORBIT_ROOT'):
         from runtime_sync import RuntimeSnapshot
+        from runtime_sync import BackgroundLockReader
         reader = RuntimeSnapshot.from_environment()
+        reader.lock_reader = BackgroundLockReader()
         if reader.root != profile.parent.parent:
             raise ValueError('Runtime projection root must match the managed profile')
         return RuntimeProxy(args, real_cli, profile, reader).run()
-    child = subprocess.Popen([str(real_cli), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    child = start_cli(real_cli, args)
     activity = Activity(profile, child.pid)
 
     def relay_input() -> None:

@@ -7,6 +7,7 @@ private struct InstanceMarker: Decodable {
     let python: String
     let backend: String
     let source_home: String
+    let engine_executable: String
 }
 
 private func fail(_ message: String) -> Never {
@@ -40,7 +41,7 @@ do {
        !(environment["ORBIT_SOURCE_HOME"] ?? "").isEmpty && environment["ORBIT_SOURCE_HOME"] != home {
         // The native browser lock runs before JS. Preserve the official loader,
         // but always supply this instance's directory before entering it.
-        let engine = contents + "/MacOS/ChatGPT"
+        let engine = contents + "/MacOS/" + marker.engine_executable
         let arguments = [engine] + CommandLine.arguments.dropFirst().filter {
             !$0.hasPrefix("--user-data-dir=")
         } + ["--user-data-dir=" + ui]

@@ -1,4 +1,4 @@
-"""Build the pinned desktop copy used only by Orbit-managed profiles.
+"""Build managed copies from the locally installed official Codex.
 
 The installed application is a read-only input. The generated copy lives under
 an Orbit-owned root; replacing it never restarts a process. The bootstrap uses
@@ -23,61 +23,16 @@ import uuid
 from local_signing import sign_app
 
 
-BUILD = "20398"
-MAIN_FILE = ".vite/build/main-CwxgTOle.js"
-MAIN_SHA256 = "87d52265eb13608a380fabcac47ecf13a39b981115c0960c18af563ea6d32d51"
-SEAM = "})}createAppHost(e){let t=G5(this.options,e),n="
-BOOTSTRAP = (
-    "}),this.disposables.add(require(require('node:path').join("
-    "process.resourcesPath,'orbit-sync.cjs')).install(this.scopedState,"
-    "this.options.windowManager,{invalidateQuery:e=>"
-    "this.broadcastQueryCacheInvalidation(e),invalidateCatalog:()=>"
-    "this.localThreadCatalogSyncCoordinator?.invalidateSource()}))}createAppHost(e){"
-    "let t=G5(this.options,e),n="
-)
-DISABLE_UPDATER = "process.env.CODEX_SPARKLE_ENABLED='false';"
 BUNDLE_ID = "local.codex-orbit.desktop"
-# Electron's name is also the existing encrypted-storage identity.
 APP_NAME = "Codex Duo Desktop"
 DISPLAY_NAME = "Codex Duo Instance"
 APP_BUNDLE_NAME = DISPLAY_NAME + ".app"
 LEGACY_APP_BUNDLE_NAME = "Codex Orbit Instance.app"
-WINDOW_TITLE_SEAM = "title:_.app.getName()"
-WINDOW_TITLE_PATCH = "title:(process.env.ORBIT_PROFILE_NAME||" + json.dumps(DISPLAY_NAME) + ")"
-EARLY_FILE = ".vite/build/early-bootstrap.js"
-EARLY_SHA256 = "036bde993c50a1a34d0f7a0ee4f3d57b5592b4cfe3b2a87b4022b263bf0367aa"
-IDENTITY_FILE = ".vite/build/bootstrap-DOZRFVdo.js"
-IDENTITY_SHA256 = "8602f1022fc835148268e8cdfcfb939d8ab5a969e4fd0b4141e264ce8ec4be4d"
-PACKAGE_FILE = "package.json"
-PACKAGE_SHA256 = "9157288fa1fd802710f4021bb6155681274c40a41e5576098277e9c223d888f7"
-APP_NAME_SEAM = "f.app.setName(r.Ut(Hk))"
-APP_NAME_PATCH = "f.app.setName(" + json.dumps(APP_NAME) + ")"
+PATCH_VERSION = 24
 INTEGRITY_SENTINEL = b"AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A"
-FRAMEWORK_FILE = "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework"
-SHARED_FILE = "webview/assets/app-shared-8340f229c2b3.js"
-INITIAL_FILE = "webview/assets/app-initial-1ab6fbe93c4f.js"
-RESUME_FILE = "webview/assets/use-resume-conversation-if-needed-3bb489937654.js"
-LOCAL_CONVERSATION_FILE = "webview/assets/local-conversation-thread-269c4ee9ddf0.js"
-SCRIPT_HASHES = {
-    SHARED_FILE: "3b4cabc382e71f0da7398393a619d7c62d13dfae598a5fe2e9880ab8d31d1bf5",
-    INITIAL_FILE: "f3d5fedc993d0ead2720c9877d8c72a82dc5fb2d935f13ad9426e6964fb6f105",
-    RESUME_FILE: "bb6bb8af0065acef78159e359240613223618a2b6941c1f27651a862e3dc47ff",
-    LOCAL_CONVERSATION_FILE: "9b5561cdb97fb19052f3f7ed0b15cd061a4285f694a19d31fb092db7b35afbb8",
-}
-PATCH_VERSION = 18
 KEYCHAIN_SERVICE_SUFFIX = b" Storage Key\0"
-# Preserve Mach-O string offsets. The native service prefix is "Codex".
 DUO_KEYCHAIN_SERVICE_SUFFIX = b" Duo Vault\0\0\0"
-IPC_FILE = ".vite/build/application-network-startup-YSC7OAs0.js"
-IPC_SHA256 = "52f0be375fb08281e88ad41be64220fb73f85210523e53e7d7acf094fda6344e"
-MAIN_RELEASE_SEAM = "e.onNotification(i.method,i.params,n)"
-MAIN_RELEASE_PATCH = (
-    "if(i.method===`thread/status/changed`&&i.params.orbitReleased===!0){"
-    "e.markAllConversationsNeedResumeAfterReconnect({restoreStreams:!1,"
-    "foregroundConversationId:null}),require(require('node:path').join("
-    "process.resourcesPath,'orbit-sync.cjs')).notifyWriterRelease(i.params.threadId)};"
-    + MAIN_RELEASE_SEAM
-)
+PATCH_RECEIPT = "duo-patches.json"
 
 
 class DesktopCopyError(RuntimeError):
@@ -85,7 +40,7 @@ class DesktopCopyError(RuntimeError):
 
 
 class DesktopCopyNeedsUpdate(DesktopCopyError):
-    """The managed desktop is valid, but its pinned patch is out of date."""
+    """The managed desktop is valid, but its source or integration patch is out of date."""
 
 
 def managed_app_path(root: Path) -> Path:
@@ -173,157 +128,147 @@ def read_asar_file(path: Path, name: str) -> bytes:
     return body
 
 
-def patch_main(body: bytes) -> bytes:
-    if hashlib.sha256(body).hexdigest() != MAIN_SHA256:
-        raise DesktopCopyError("Codex 桌面脚本已变化，尚未核验此版本。")
-    text = body.decode("utf-8")
-    if text.count(SEAM) != 1:
-        raise DesktopCopyError("Codex 桌面同步接入位置与已核验版本不同。")
-    if text.count(MAIN_RELEASE_SEAM) != 1:
-        raise DesktopCopyError("Codex 会话释放接入位置与已核验版本不同。")
-    if text.count(WINDOW_TITLE_SEAM) != 4:
-        raise DesktopCopyError("Codex 窗口命名位置与已核验版本不同。")
-    text = text.replace(SEAM, BOOTSTRAP, 1).replace(MAIN_RELEASE_SEAM, MAIN_RELEASE_PATCH, 1)
-    text = text.replace(WINDOW_TITLE_SEAM, WINDOW_TITLE_PATCH)
-    return (DISABLE_UPDATER + text).encode("utf-8")
+def framework_path(app: Path) -> Path:
+    """Resolve Electron's installed framework without pinning its version."""
+    frameworks = list((app / 'Contents/Frameworks').glob('*.framework'))
+    matches = [p / 'Versions/Current' / p.stem for p in frameworks
+               if (p / 'Versions/Current' / p.stem).is_file()]
+    matches = [p for p in matches if 'Codex' in p.name or 'Electron' in p.name]
+    if len(matches) != 1 or not matches[0].resolve().is_relative_to(app.resolve()):
+        raise DesktopCopyError('无法唯一定位 Codex 的 Electron framework，未修改副本。')
+    return matches[0]
 
 
-def patch_early_bootstrap(body: bytes, app_name: str = APP_NAME) -> bytes:
-    if hashlib.sha256(body).hexdigest() != EARLY_SHA256:
-        raise DesktopCopyError("Codex 早期启动脚本已变化，尚未核验此版本。")
-    # Directly opening this generated app omits the isolated launcher env. Do
-    # not evaluate native startup modules that would then use the official home.
-    prefix = (
-        "const orbitEarlyApp=require('electron').app;"
-        "const orbitEarlyPath=require('node:path');"
-        "if(process.env.ORBIT_ROOT&&process.env.CODEX_HOME&&"
-        "process.env.ORBIT_SOURCE_HOME&&process.env.CODEX_ELECTRON_USER_DATA_PATH&&"
-        "orbitEarlyPath.resolve(process.env.CODEX_HOME)!=="
-        "orbitEarlyPath.resolve(process.env.ORBIT_SOURCE_HOME)){"
-        + DISABLE_UPDATER + "orbitEarlyApp.setName(" + json.dumps(app_name) + ");"
+def source_identity(app: Path) -> dict:
+    """Use native metadata and the archive's own integrity receipt for reuse."""
+    app = Path(app).expanduser().resolve()
+    try:
+        info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    except FileNotFoundError:
+        raise DesktopCopyError('未找到本机原生 Codex，请先安装官方桌面应用。') from None
+    executable = info.get('CFBundleExecutable', '')
+    if (info.get('CFBundleIdentifier') != 'com.openai.codex' or
+            not executable or Path(executable).name != executable or
+            not (app / 'Contents/MacOS' / executable).is_file()):
+        raise DesktopCopyError('所选应用不是可识别的原生 Codex。')
+    _, _, header_json = read_asar_header(app / 'Contents/Resources/app.asar')
+    header_hash = hashlib.sha256(header_json).hexdigest()
+    if info.get('ElectronAsarIntegrity', {}).get('Resources/app.asar') != {
+            'algorithm': 'SHA256', 'hash': header_hash}:
+        raise DesktopCopyError('原生 Codex 的应用归档与完整性记录不一致，请等待更新完成后重试。')
+    return {'build': info['CFBundleVersion'], 'version': info['CFBundleShortVersionString'],
+            'executable': executable, 'source_header_sha256': header_hash}
+
+
+def _asar_entries(header: dict, prefix: str = ''):
+    for name, entry in header.get('files', {}).items():
+        path = prefix + name
+        if 'files' in entry:
+            yield from _asar_entries(entry, path + '/')
+        else:
+            yield path, entry
+
+
+def _is_numeric_renderer_candidate(body: bytes) -> bool:
+    """Keep only chunks containing a complete renderer integration contract."""
+    contracts = (
+        (b'recordThreadRuntimeStatusEvidence', b'.threadStore.conversations.has', b'thread/status/changed'),
+        (b'workspace-root-options-updated', b'global-state-updated', b'switch('),
+        (b'isWriterConflict:', b'retryResume:', b'resumeLiveWriterError'),
+        (b'isWriterConflict:', b'submitDisabled:', b'isResuming:', b'isThreadHistoryLoading:'),
     )
-    suffix = (
-        "\n}else{console.error('Launch this managed desktop from Codex Duo.');"
-        "orbitEarlyApp.exit(0);}\n"
-    )
-    return prefix.encode() + body + suffix.encode()
+    from desktop_speed_ui_patches import is_speed_ui_script
+    speed_request = (b'Failed to read service tier for request' in body and
+                     b'Failed to read service tier model' in body and b'amazonBedrock' in body)
+    return (any(all(marker in body for marker in contract) for contract in contracts)
+            or is_speed_ui_script(body) or speed_request)
 
 
-def patch_identity_bootstrap(body: bytes, app_name: str = APP_NAME) -> bytes:
-    if hashlib.sha256(body).hexdigest() != IDENTITY_SHA256:
-        raise DesktopCopyError("Codex 应用命名脚本已变化，尚未核验此版本。")
-    if body.count(APP_NAME_SEAM.encode()) != 1:
-        raise DesktopCopyError("Codex 应用命名位置与已核验版本不同。")
-    # Keep the JS storage name independent of per-instance display names.
-    # The native framework's service namespace is patched separately below.
-    patch = "f.app.setName(" + json.dumps(app_name) + ")"
-    return body.replace(APP_NAME_SEAM.encode(), patch.encode(), 1)
+def read_patch_scripts(asar: Path, names=None) -> dict[str, bytes]:
+    # Read the header once. Locale and unrelated feature chunks account for
+    # hundreds of MB, so inspect only main-process and relevant UI modules.
+    header, start, _ = read_asar_header(asar)
+    prefixes = ('app-shared-', 'app-initial-', 'local-conversation-thread-',
+                'use-resume-conversation-if-needed-', 'initialize-app-host-services-')
+    selected = set(names) if names is not None else None
+    result = {}
+    with asar.open('rb') as stream:
+        if selected is None:
+            package_entry = _entry(header, 'package.json')
+            stream.seek(start + int(package_entry['offset']))
+            package = json.loads(stream.read(package_entry['size']))
+            main = package['main'].removeprefix('./')
+            main_directory = str(Path(main).parent) + '/'
+        for name, entry in _asar_entries(header):
+            wanted = (name in selected if selected is not None else
+                      name == 'package.json' or
+                      name.startswith(main_directory) and name.endswith('.js') or
+                      name.endswith('.js') and
+                      Path(name).name.startswith(prefixes))
+            numeric_chunk = (selected is None and name.startswith('webview/assets/async/')
+                             and re.fullmatch(r'\d+\.[0-9a-f]+\.js', Path(name).name))
+            if not wanted and not numeric_chunk:
+                continue
+            if entry.get('unpacked') or 'offset' not in entry:
+                if wanted:
+                    raise DesktopCopyError('Codex 集成脚本不是完整的归档文件：' + name)
+                continue
+            stream.seek(start + int(entry['offset']))
+            body = stream.read(entry['size'])
+            if len(body) != entry['size']:
+                raise DesktopCopyError('Codex 集成脚本不完整：' + name)
+            if wanted or _is_numeric_renderer_candidate(body):
+                result[name] = body
+    if selected is not None and result.keys() != selected:
+        raise DesktopCopyError('受管归档缺少已记录的集成脚本。')
+    return result
 
 
-def patch_package_identity(body: bytes, app_name: str = APP_NAME) -> bytes:
-    if hashlib.sha256(body).hexdigest() != PACKAGE_SHA256:
-        raise DesktopCopyError("Codex package 元数据已变化，尚未核验此版本。")
-    package = json.loads(body)
-    package["name"] = "codex-orbit-desktop"
-    package["productName"] = app_name
-    return (json.dumps(package, indent=2, ensure_ascii=False) + "\n").encode()
+def patch_plan(app: Path) -> dict[str, bytes]:
+    from desktop_main_patches import discover_main_patches, PatchError as MainPatchError
+    from desktop_renderer_patches import discover_renderer_patches, PatchError as RendererPatchError
+    scripts = read_patch_scripts(app / 'Contents/Resources/app.asar')
+    if not any(b'CODEX_ELECTRON_USER_DATA_PATH' in body and b'userData' in body
+               for body in scripts.values()) or not any(b'CODEX_HOME' in b for b in scripts.values()):
+        raise DesktopCopyError('当前原生 Codex 未提供可识别的独立登录/窗口目录入口。')
+    try:
+        main = discover_main_patches(scripts, APP_NAME, DISPLAY_NAME)
+        renderer = discover_renderer_patches(scripts)
+    except (MainPatchError, RendererPatchError) as error:
+        raise DesktopCopyError('当前 Codex 的集成接口不兼容：' + str(error)) from error
+    # Speed support is optional: if the official UI changes, preserve the
+    # working Duo copy without installing a partial or misleading control.
+    from desktop_speed_request_patches import discover_speed_request_patches, PatchError as SpeedRequestError
+    from desktop_speed_ui_patches import discover_speed_ui_patches
+    base = {**main, **renderer}
+    try:
+        working = {**scripts, **base}
+        request = discover_speed_request_patches(working)
+        working.update(request)
+        ui = discover_speed_ui_patches(working)
+    except (SpeedRequestError, RendererPatchError) as error:
+        print('Codex Duo API 速度选择不可用：' + str(error), file=sys.stderr)
+        return base
+    return {**base, **request, **ui}
 
 
-def patch_runtime_script(name: str, body: bytes) -> bytes:
-    if hashlib.sha256(body).hexdigest() != SCRIPT_HASHES[name]:
-        raise DesktopCopyError("Codex 运行状态脚本已变化，尚未核验此版本。")
-    text = body.decode("utf-8")
-    if name == SHARED_FILE:
-        seam = "let a=Y(r);if(!t.threadStore.conversations.has(a)){let e=t.threadStore.recordThreadRuntimeStatusEvidence(r,i);"
-        patch = (
-            "let a=Y(r);if(n.params.orbitReleased===!0){"
-            "e.inactiveThreadUnsubscriber.clearConversationStreamOwnership(a),"
-            "e.updateConversationState(a,e=>{e.resumeState=`needs_resume`});"
-            "window.dispatchEvent(new CustomEvent('orbit-writer-locks-changed',"
-            "{detail:{threadId:r,has_writer:!1}}))};"
-            "if(!t.threadStore.conversations.has(a)){let e=t.threadStore.recordThreadRuntimeStatusEvidence(r,i);"
-        )
-    elif name == INITIAL_FILE:
-        seam = "case`workspace-root-options-updated`:f.invalidateQueries"
-        patch = (
-            "case`orbit-writer-locks-changed`:window.dispatchEvent(new CustomEvent("
-            "'orbit-writer-locks-changed',{detail:e}));break bb460;"
-            "case`orbit-writer-handoff-available`:window.dispatchEvent(new CustomEvent("
-            "'orbit-writer-handoff-available',{detail:e}));break bb460;"
-            "case`workspace-root-options-updated`:f.invalidateQueries"
-        )
-    elif name == RESUME_FILE:
-        seam = "let I=P,L;"
-        patch = (
-            "let I=P;(0,B.useLayoutEffect)(()=>{x(g)},[e,g]);"
-            "(0,B.useEffect)(()=>{let t=t=>{"
-            "t.detail?.threadId===e&&(t.detail?.has_writer===!1||"
-            "t.type==='orbit-writer-handoff-available'&&t.detail?.handoff_available===!0)&&"
-            "A.current===e&&fe===e&&I()};"
-            "return window.addEventListener('orbit-writer-locks-changed',t),"
-            "window.addEventListener('orbit-writer-handoff-available',t),"
-            "()=>{window.removeEventListener('orbit-writer-locks-changed',t);"
-            "window.removeEventListener('orbit-writer-handoff-available',t)}},[e,fe,I]);let L;"
-        )
-        message = (
-            "id:`localTaskRow.resumeLiveWriterError`,defaultMessage:`This task is active elsewhere."
-            "{br}Close it there, then retry here.`"
-        )
-        replacement = (
-            "id:`orbit.resumeWriterHeld`,defaultMessage:e.locale.toLowerCase().startsWith(`zh`)?"
-            "`另一窗口仍占有此会话的写入权。{br}任务可能已经空闲；等待写入权释放后重试。`:"
-            "`Another window still holds this chat's writer.{br}The task may be idle; retry after the writer is released.`"
-        )
-        if text.count(message) != 1:
-            raise DesktopCopyError("Codex 写入权错误提示与已核验版本不同。")
-        text = text.replace(message, replacement, 1)
-    else:
-        replacements = {
-            "function wj(e){let t=(0,Fj.c)(21)":
-                "function wj(e){let t=(0,Fj.c)(23)",
-            "let _=g,v,y,b;t[9]===Symbol.for(`react.memo_cache_sentinel`)?":
-                "let _=g,v,y,b,orbitChinese=Ai().locale.toLowerCase().startsWith(`zh`);"
-                "t[9]===Symbol.for(`react.memo_cache_sentinel`)||t[21]!==orbitChinese?",
-            "t[9]=v,t[10]=y,t[11]=b):(v=t[9],y=t[10],b=t[11]);let x;":
-                "t[9]=v,t[10]=y,t[11]=b,t[21]=orbitChinese):"
-                "(v=t[9],y=t[10],b=t[11]);let x;",
-            "t[16]!==p||t[17]!==i||t[18]!==x||t[19]!==S?":
-                "t[16]!==p||t[17]!==i||t[18]!==x||t[19]!==S||t[22]!==orbitChinese?",
-            "t[18]=x,t[19]=S,t[20]=C):C=t[20],C}function Tj":
-                "t[18]=x,t[19]=S,t[20]=C,t[22]=orbitChinese):C=t[20],C}function Tj",
-            "let B=!_||F,V=M&&!F,ee=_&&!F,H;":
-                "let B=!_||F||M,V=M&&!F,ee=_&&!F&&!M,H;",
-            "let Et=Oe.visibleSurface!=null,Dt=W==null||Ke&&!Ye,Ot=M||Re||Ye,J=Ke&&!Ye,kt;":
-                "let Et=Oe.visibleSurface!=null,Dt=W==null||Ke&&!Ye,Ot=M||Re||Ye||Ke,J=Ke&&!Ye,kt;",
-            "let At=F&&!Re&&!Ye,jt;": "let At=F&&!Re&&!Ye&&!Ke,jt;",
-            "submitDisabled:i||j||F,isThreadHandoffInProgress:F":
-                "submitDisabled:i||j||F||c,isThreadHandoffInProgress:F",
-            "id:`localConversation.writerConflict.title`,defaultMessage:`This is open in another app`":
-                "id:`orbit.writerHeld.title`,defaultMessage:orbitChinese?"
-                "`另一窗口占有此会话的写入权`:`Another window holds this chat's writer`",
-            "id:`localConversation.writerConflict.description`,defaultMessage:`Close it there to continue here.`":
-                "id:`orbit.writerHeld.description`,defaultMessage:orbitChinese?"
-                "`任务可能已经空闲，但后端仍占有写入权。等待释放后重试。`:"
-                "`The task may be idle, but its backend still holds the writer. Retry after it releases the chat.`",
-        }
-        for original, replacement in replacements.items():
-            if text.count(original) != 1:
-                raise DesktopCopyError("Codex 会话输入或占用提示与已核验版本不同。")
-            text = text.replace(original, replacement, 1)
-        return text.encode("utf-8")
-    if text.count(seam) != 1:
-        raise DesktopCopyError("Codex 运行状态接入位置与已核验版本不同。")
-    return text.replace(seam, patch, 1).encode("utf-8")
+def check_desktop_support(app: Path) -> dict:
+    """Read-only capability check, independent of the native build number."""
+    app = Path(app).expanduser().resolve()
+    identity = source_identity(app)
+    patches = patch_plan(app)
+    info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    if framework_integrity_digest(framework_path(app))[1] != integrity_dictionary_digest(info['ElectronAsarIntegrity']):
+        raise DesktopCopyError('原生 Codex 的 Electron 完整性记录不一致。')
+    return {**identity, 'patch_scripts': len(patches),
+            'api_speed_available': any(b'orbit-api-speed-request-hook' in body for body in patches.values())}
 
 
-def patch_ipc_script(body: bytes) -> bytes:
-    if hashlib.sha256(body).hexdigest() != IPC_SHA256:
-        raise DesktopCopyError("Codex IPC 脚本已变化，尚未核验此版本。")
-    seam = "let e=s.join(xr(),`ipc`);a.mkdirSync(e,{mode:448,recursive:!0});"
-    if body.count(seam.encode()) != 1:
-        raise DesktopCopyError("Codex IPC 目录接入位置与已核验版本不同。")
-    return body.replace(seam.encode(),
-                        b"let e=process.env.ORBIT_IPC_DIR||s.join(xr(),`ipc`);a.mkdirSync(e,{mode:448,recursive:!0});", 1)
+def _copy_signature(source_app: Path, sync_bytes: bytes) -> dict:
+    return {**source_identity(source_app), 'source_app': str(source_app.resolve()),
+            'patch_version': PATCH_VERSION,
+            'launcher_sha256': hashlib.sha256(Path(__file__).with_name('duo-instance-launcher').read_bytes()).hexdigest(),
+            'sync_sha256': hashlib.sha256(sync_bytes).hexdigest()}
 
 
 def _ipc_path(root: Path, profile: str) -> Path:
@@ -416,7 +361,9 @@ def replace_asar_files(path: Path, replacements: dict[str, bytes]) -> str:
 def _run(command: list[str], *, timeout=120) -> None:
     result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
     if result.returncode:
-        raise DesktopCopyError(result.stderr.strip() or "桌面副本命令执行失败。")
+        # Subprocess diagnostics may contain local paths or other sensitive data.
+        operation = '签名验证' if command[0] == '/usr/bin/codesign' else '复制'
+        raise DesktopCopyError('桌面副本' + operation + '失败。')
 
 
 def integrity_dictionary_digest(integrity: dict) -> bytes:
@@ -468,72 +415,60 @@ def patch_keychain_service(path: Path) -> None:
 def verify_copy(app: Path, *, allow_legacy_display: bool = False,
                 profile_id: str | None = None, display_name: str | None = None) -> dict:
     app = Path(app)
-    plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    asar = app / "Contents/Resources/app.asar"
+    resources = app / 'Contents/Resources'
+    plist = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    asar = resources / 'app.asar'
     header, _, header_json = read_asar_header(asar)
     header_hash = hashlib.sha256(header_json).hexdigest()
-    integrity = plist.get("ElectronAsarIntegrity", {}).get("Resources/app.asar", {})
-    if integrity != {"algorithm": "SHA256", "hash": header_hash}:
-        raise DesktopCopyError("受管 app.asar 与 Electron 头校验不一致。")
-    body = read_asar_file(asar, MAIN_FILE)
-    digest = hashlib.sha256(body).hexdigest()
-    if (digest != _entry(header, MAIN_FILE)["integrity"]["hash"] or
-            BOOTSTRAP.encode() not in body or not body.startswith(DISABLE_UPDATER.encode())):
-        raise DesktopCopyError("受管桌面同步脚本校验失败。")
-    if not allow_legacy_display and (body.count(WINDOW_TITLE_PATCH.encode()) != 4
-                                     or WINDOW_TITLE_SEAM.encode() in body):
-        raise DesktopCopyError("受管窗口标题尚未更新为 Codex Duo。")
+    if plist.get('ElectronAsarIntegrity', {}).get('Resources/app.asar') != {
+            'algorithm': 'SHA256', 'hash': header_hash}:
+        raise DesktopCopyError('受管 app.asar 与 Electron 头校验不一致。')
+    try:
+        receipt = json.loads((resources / PATCH_RECEIPT).read_text())
+    except FileNotFoundError:
+        raise DesktopCopyNeedsUpdate('实例使用旧版集成方式，需要在停止后从原生 Codex 更新。') from None
+    if receipt.get('patch_version') != PATCH_VERSION:
+        raise DesktopCopyNeedsUpdate('实例集成需要更新，请先关闭对应实例。')
+    scripts = read_patch_scripts(asar, receipt['scripts'])
+    for name, body in scripts.items():
+        digest = hashlib.sha256(body).hexdigest()
+        if digest != receipt['scripts'][name] or digest != _entry(header, name)['integrity']['hash']:
+            raise DesktopCopyError('受管集成脚本与生成记录不一致：' + name)
+    # The receipt is sealed by the app signature. Verify the actual integration
+    # markers as well, without depending on hashed filenames or minified names.
+    from desktop_main_patches import validate_main_patches, PatchError
+    try:
+        validate_main_patches(scripts, APP_NAME, DISPLAY_NAME)
+    except PatchError as error:
+        raise DesktopCopyError('受管主进程集成校验失败：' + str(error)) from error
+    for marker in (b'orbit-renderer-writer-release', b'orbit-renderer-host-events',
+                   b'orbit-renderer-resume', b'orbit-renderer-input-gates'):
+        if not any(marker in body for body in scripts.values()):
+            raise DesktopCopyError('受管会话集成标记不完整。')
     expected_id = profile_bundle_id(profile_id) if profile_id else BUNDLE_ID
-    if plist.get("CFBundleIdentifier") != expected_id:
-        raise DesktopCopyError("受管桌面副本没有独立应用标识。")
-    names = {DISPLAY_NAME, APP_NAME} if allow_legacy_display else {display_name or DISPLAY_NAME}
-    if (plist.get("CFBundleName") not in names or
-            plist.get("CFBundleDisplayName") != plist.get("CFBundleName")):
-        raise DesktopCopyError("受管桌面副本没有独立应用名称。")
-    identity = read_asar_file(asar, IDENTITY_FILE)
-    early = read_asar_file(asar, EARLY_FILE)
-    package = read_asar_file(asar, PACKAGE_FILE)
-    if (APP_NAME_PATCH.encode() not in identity or
-            ("orbitEarlyApp.setName(" + json.dumps(APP_NAME) + ")").encode() not in early or
-            b"orbitEarlyApp.exit(0)" not in early or
-            json.loads(package).get("productName") != APP_NAME):
-        raise DesktopCopyError("受管桌面启动边界或钥匙串命名校验失败。")
-    for name, script in [(IDENTITY_FILE, identity), (EARLY_FILE, early), (PACKAGE_FILE, package)]:
-        if hashlib.sha256(script).hexdigest() != _entry(header, name)["integrity"]["hash"]:
-            raise DesktopCopyError("受管应用身份脚本摘要校验失败。")
-    _, framework_digest = framework_integrity_digest(app / FRAMEWORK_FILE)
-    if framework_digest != integrity_dictionary_digest(plist["ElectronAsarIntegrity"]):
-        raise DesktopCopyError("Electron 内嵌字典摘要与受管 app.asar 不一致。")
-    with (app / FRAMEWORK_FILE).open("rb") as stream, mmap.mmap(
-            stream.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-        if (mapped.find(DUO_KEYCHAIN_SERVICE_SUFFIX) < 0 or
-                mapped.find(KEYCHAIN_SERVICE_SUFFIX) >= 0):
-            raise DesktopCopyError("受管桌面仍会访问官方存储钥匙串。")
-    for name in SCRIPT_HASHES:
-        script = read_asar_file(asar, name)
-        marker = b"orbit.writerHeld.title" if name == LOCAL_CONVERSATION_FILE else b"orbit-writer-locks-changed"
-        if (hashlib.sha256(script).hexdigest() != _entry(header, name)["integrity"]["hash"] or
-                marker not in script):
-            raise DesktopCopyError("受管运行状态脚本校验失败。")
-    ipc_script = read_asar_file(asar, IPC_FILE)
-    if (b"process.env.ORBIT_IPC_DIR" not in ipc_script or
-            hashlib.sha256(ipc_script).hexdigest() != _entry(header, IPC_FILE)["integrity"]["hash"]):
-        raise DesktopCopyError("受管 IPC 脚本校验失败。")
+    if plist.get('CFBundleIdentifier') != expected_id:
+        raise DesktopCopyError('受管桌面副本没有独立应用标识。')
+    if (plist.get('CFBundleName') != (display_name or DISPLAY_NAME) or
+            plist.get('CFBundleDisplayName') != plist.get('CFBundleName')):
+        raise DesktopCopyError('受管桌面副本没有独立应用名称。')
+    framework = framework_path(app)
+    if framework_integrity_digest(framework)[1] != integrity_dictionary_digest(plist['ElectronAsarIntegrity']):
+        raise DesktopCopyError('Electron 内嵌字典摘要与受管 app.asar 不一致。')
+    with framework.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+        if mapped.find(DUO_KEYCHAIN_SERVICE_SUFFIX) < 0 or mapped.find(KEYCHAIN_SERVICE_SUFFIX) >= 0:
+            raise DesktopCopyError('受管桌面仍会访问官方存储钥匙串。')
     if profile_id:
-        marker = json.loads((app / 'Contents/Resources/duo-instance.json').read_text())
+        marker = json.loads((resources / 'duo-instance.json').read_text())
         if marker['profile_id'] != profile_id:
-            raise DesktopCopyError("实例应用包的启动身份不匹配。")
-        # Different Dock identities are variants of the same managed code and
-        # must keep the prior storage-access signing identity, not change the key.
-        _run(['/usr/bin/codesign', '--verify', '-R', '=identifier "' + BUNDLE_ID + '"', str(app)])
-    if not allow_legacy_display and plist.get('CFBundleExecutable') != 'DuoInstance':
+            raise DesktopCopyError('实例应用包的启动身份不匹配。')
+    if plist.get('CFBundleExecutable') != 'DuoInstance':
         raise DesktopCopyError('受管应用没有原生隔离启动入口。')
-    if not allow_legacy_display:
-        _run(['/usr/bin/codesign', '--verify', '-R', '=identifier "' + BUNDLE_ID + '"',
-              str(app / 'Contents/MacOS/ChatGPT')])
-    _run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
-    return {"build": plist["CFBundleVersion"], "header_sha256": header_hash,
-            "main_sha256": digest, "signature_verified": True}
+    engine = app / 'Contents/MacOS' / receipt['executable']
+    for code in (engine, app):
+        _run(['/usr/bin/codesign', '--verify', '-R', '=identifier "' + BUNDLE_ID + '"', str(code)])
+    _run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)])
+    return {'build': plist['CFBundleVersion'], 'header_sha256': header_hash,
+            'signature_verified': True}
 
 
 def _install_copy(staging: Path, destination: Path, existing: Path,
@@ -589,97 +524,64 @@ def _cleanup_recorded_previous(record_path: Path) -> None:
 
 def prepare_copy(root: Path, source_app: Path, sync_module: Path | None = None,
                  *, allow_replace_stopped: bool = False, signing_identity: str = "-") -> Path:
-    """Create/reuse a verified pinned app in root/desktop; never launch it."""
+    """Clone the installed native app and apply discovered integration seams."""
     root = _owned_root(root)
     source_app = Path(source_app).expanduser().resolve()
-    destination = root / "desktop" / APP_BUNDLE_NAME
-    existing = managed_app_path(root)
     if source_app.is_relative_to(root):
-        raise DesktopCopyError("官方桌面输入不得来自 Orbit 生成目录。")
-    source_plist = plistlib.loads((source_app / "Contents/Info.plist").read_bytes())
-    if source_plist.get("CFBundleVersion") != BUILD or source_plist.get("CFBundleIdentifier") != "com.openai.codex":
-        raise DesktopCopyError("尚未核验此 Codex 版本，未生成桌面副本。")
-    sync_module = Path(sync_module or Path(__file__).with_name("managed_sync.js"))
-    sync_bytes = sync_module.read_bytes()
-    packaged = Path(__file__).resolve().parent.parent / "desktop" / APP_BUNDLE_NAME
-    signature = {"build": BUILD, "patch_version": PATCH_VERSION,
-                 "launcher_sha256": hashlib.sha256(Path(__file__).with_name('duo-instance-launcher').read_bytes()).hexdigest(),
-                 "sync_sha256": hashlib.sha256(sync_bytes).hexdigest()}
-    if packaged.is_dir():
-        # The publisher signs this engine once. Local instances inherit it,
-        # and users never need a publisher certificate/private key.
-        record = json.loads(packaged.with_name("copy.json").read_text())
-        if any(record.get(key) != value for key, value in signature.items()):
-            raise DesktopCopyError("随应用提供的运行引擎与启动器版本不匹配。")
-        # A publisher DR intentionally survives releases. The signed template's
-        # CDHash also covers its resource seal and distinguishes changed code.
-        signature["packaged_engine"] = record["engine_cdhash"]
-    record_path = root / "desktop/copy.json"
-    if existing.exists() and record_path.exists():
+        raise DesktopCopyError('原生 Codex 输入不得来自 Duo 生成目录。')
+    destination = root / 'desktop' / APP_BUNDLE_NAME
+    existing = managed_app_path(root)
+    sync_bytes = Path(sync_module or Path(__file__).with_name('managed_sync.js')).read_bytes()
+    signature = _copy_signature(source_app, sync_bytes)
+    record_path = root / 'desktop/copy.json'
+    if existing.exists():
+        if not record_path.exists():
+            raise DesktopCopyError('受管副本已有文件但无完成记录，未覆盖。')
         saved = json.loads(record_path.read_text())
-        if existing == destination and all(saved.get(key) == value for key, value in signature.items()):
+        if existing == destination and all(saved.get(k) == v for k, v in signature.items()):
             verify_copy(destination)
             _cleanup_recorded_previous(record_path)
             return destination
         if not allow_replace_stopped:
-            raise DesktopCopyNeedsUpdate("受管桌面副本需要更新；请先关闭受管实例。")
-    elif existing.exists():
-        raise DesktopCopyError("受管副本已有文件但无完成记录，未覆盖。")
-    original_main = read_asar_file(source_app / "Contents/Resources/app.asar", MAIN_FILE)
-    patched_main = patch_main(original_main)
-    patched_runtime = {name: patch_runtime_script(name, read_asar_file(
-        source_app / "Contents/Resources/app.asar", name)) for name in SCRIPT_HASHES}
-    patched_ipc = patch_ipc_script(read_asar_file(source_app / "Contents/Resources/app.asar", IPC_FILE))
-    patched_identity = {
-        EARLY_FILE: patch_early_bootstrap(read_asar_file(source_app / "Contents/Resources/app.asar", EARLY_FILE)),
-        IDENTITY_FILE: patch_identity_bootstrap(read_asar_file(source_app / "Contents/Resources/app.asar", IDENTITY_FILE)),
-        PACKAGE_FILE: patch_package_identity(read_asar_file(source_app / "Contents/Resources/app.asar", PACKAGE_FILE)),
-    }
-    staging = root / "desktop" / (".preparing-" + uuid.uuid4().hex + ".app")
+            raise DesktopCopyNeedsUpdate('原生 Codex 或 Duo 集成已更新；请先关闭对应受管实例。')
+    staging = root / 'desktop' / ('.preparing-' + uuid.uuid4().hex + '.app')
     try:
-        if packaged.is_dir():
-            verify_copy(packaged)
-            _run(["/bin/cp", "-cR", str(packaged), str(staging)])
-            verified = verify_copy(staging)
-            _install_copy(staging, destination, existing, record_path, {**signature, **verified})
-            return destination
-        # Darwin's -c uses APFS copy-on-write clones for regular files. Bundle
-        # symlinks stay symlinks. Patch/sign only after cloning has completed.
-        _run(["/bin/cp", "-cR", str(source_app), str(staging)])
-        resources = staging / "Contents/Resources"
-        (resources / "orbit-sync.cjs").write_bytes(sync_bytes)
+        # A local APFS clone snapshots the installed official app. Never reuse
+        # an engine bundled in the manager or mutate the original installation.
+        _run(['/bin/cp', '-cR', str(source_app), str(staging)])
+        if source_identity(staging) != {k: signature[k] for k in
+                ('build', 'version', 'executable', 'source_header_sha256')}:
+            raise DesktopCopyError('准备期间原生 Codex 发生更新，请待更新完成后重试。')
+        patches = patch_plan(staging)
+        resources = staging / 'Contents/Resources'
+        info_path = staging / 'Contents/Info.plist'
+        source_plist = plistlib.loads(info_path.read_bytes())
+        (resources / 'orbit-sync.cjs').write_bytes(sync_bytes)
         launcher = staging / 'Contents/MacOS/DuoInstance'
         shutil.copyfile(Path(__file__).with_name('duo-instance-launcher'), launcher)
         launcher.chmod(0o755)
-        header_hash = replace_asar_files(resources / "app.asar",
-                                        {MAIN_FILE: patched_main, **patched_runtime, IPC_FILE: patched_ipc,
-                                         **patched_identity})
+        receipt = {'patch_version': PATCH_VERSION, 'executable': signature['executable'],
+                   'api_speed_available': any(b'orbit-api-speed-request-hook' in body for body in patches.values()),
+                   'source': {k: signature[k] for k in ('build', 'version', 'source_header_sha256')},
+                   'scripts': {name: hashlib.sha256(body).hexdigest() for name, body in patches.items()}}
+        (resources / PATCH_RECEIPT).write_text(json.dumps(receipt, indent=2) + '\n')
+        header_hash = replace_asar_files(resources / 'app.asar', patches)
         copy_plist = dict(source_plist)
-        copy_plist["CFBundleName"] = DISPLAY_NAME
-        copy_plist["CFBundleDisplayName"] = DISPLAY_NAME
-        copy_plist["CFBundleIdentifier"] = BUNDLE_ID
-        copy_plist['CFBundleExecutable'] = 'DuoInstance'
-        copy_plist["NSDocumentsFolderUsageDescription"] = (
-            "仅在你打开“文稿”中的项目时，此额外 Codex 窗口才需要访问该项目文件。"
-        )
-        # Let the installed official app retain ownership of its URL scheme.
-        # app-server subscription login uses its own localhost OAuth callback.
-        copy_plist.pop("CFBundleURLTypes", None)
-        copy_plist["ElectronAsarIntegrity"] = {
-            **copy_plist.get("ElectronAsarIntegrity", {}),
-            "Resources/app.asar": {"algorithm": "SHA256", "hash": header_hash},
-        }
-        update_framework_integrity(staging / FRAMEWORK_FILE,
-                                   source_plist["ElectronAsarIntegrity"],
-                                   copy_plist["ElectronAsarIntegrity"])
-        patch_keychain_service(staging / FRAMEWORK_FILE)
-        with (staging / "Contents/Info.plist").open("wb") as stream:
-            plistlib.dump(copy_plist, stream)
+        copy_plist.update(CFBundleName=DISPLAY_NAME, CFBundleDisplayName=DISPLAY_NAME,
+                          CFBundleIdentifier=BUNDLE_ID, CFBundleExecutable='DuoInstance',
+                          NSDocumentsFolderUsageDescription='仅在打开“文稿”中的项目时，此 Codex 窗口才需要访问该项目文件。')
+        copy_plist.pop('CFBundleURLTypes', None)
+        copy_plist['ElectronAsarIntegrity'] = {
+            **copy_plist.get('ElectronAsarIntegrity', {}),
+            'Resources/app.asar': {'algorithm': 'SHA256', 'hash': header_hash}}
+        framework = framework_path(staging)
+        update_framework_integrity(framework, source_plist['ElectronAsarIntegrity'],
+                                   copy_plist['ElectronAsarIntegrity'])
+        patch_keychain_service(framework)
+        info_path.write_bytes(plistlib.dumps(copy_plist))
         sign_app(staging, identity=signing_identity)
-        # --deep derives an identifier for the now-nested engine. Restore the
-        # prior storage-access identity, then seal its signature in the wrapper.
-        sign_app(staging / 'Contents/MacOS/ChatGPT', deep=False, identifier=BUNDLE_ID,
-                 identity=signing_identity)
+        sign_app(staging / 'Contents/MacOS' / signature['executable'], deep=False,
+                 identifier=BUNDLE_ID, identity=signing_identity)
         sign_app(staging, deep=False, identifier=BUNDLE_ID, identity=signing_identity)
         verified = verify_copy(staging)
         _install_copy(staging, destination, existing, record_path, {**signature, **verified})
@@ -691,7 +593,7 @@ def prepare_copy(root: Path, source_app: Path, sync_module: Path | None = None,
 
 def ensure_desktop(root: Path, source_app: Path = Path("/Applications/ChatGPT.app"),
                    *, allow_replace_stopped: bool = False) -> Path:
-    """Allow replacement only after the caller has stopped all managed profiles."""
+    """The caller checks that no old process runs directly from the template."""
     return prepare_copy(root, source_app, allow_replace_stopped=allow_replace_stopped)
 
 
@@ -716,14 +618,10 @@ def ensure_profile_desktop(root: Path, profile: dict,
     marker = {'profile_id': profile['id'], 'python': sys.executable,
               'source_home': manifest.get('sync', {}).get('source_home', str(Path.home() / '.codex')),
               'backend': str(Path(__file__).resolve().with_name('backend.py'))}
-    signature = {'build': BUILD, 'patch_version': PATCH_VERSION,
-                 'launcher_sha256': hashlib.sha256(Path(__file__).with_name('duo-instance-launcher').read_bytes()).hexdigest(),
-                 'sync_sha256': hashlib.sha256(sync_bytes).hexdigest(),
+    signature = {**_copy_signature(Path(source_app), sync_bytes),
                  'display_name': name, 'bundle_id': profile_bundle_id(profile['id']),
                  'app_name': destination.name, 'dock_launch': marker}
-    packaged = Path(__file__).resolve().parent.parent / 'desktop' / APP_BUNDLE_NAME
-    if packaged.is_dir():
-        signature['packaged_engine'] = json.loads(packaged.with_name('copy.json').read_text())['engine_cdhash']
+    marker['engine_executable'] = signature['executable']
     if existing.exists():
         if not record_path.exists():
             raise DesktopCopyError('实例应用包缺少完成记录，未覆盖。')
